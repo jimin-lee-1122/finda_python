@@ -9,6 +9,7 @@ from matplotlib import pyplot as plt
 from mpl_toolkits.mplot3d import Axes3D  # noqa: F401 -- needed for 3D plotting
 from scipy.stats import norm
 from tqdm import tqdm
+from concurrent.futures import ThreadPoolExecutor
 
 logging.basicConfig(format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger(__name__)
@@ -95,6 +96,17 @@ def compute_iv(
     return df.dropna(subset=['IV'])
 
 
+def compute_iv_parallel(df, option, r=0.03):
+    with ThreadPoolExecutor() as executor:
+        ivs = list(executor.map(
+            lambda row: implied_vol(row['Price'], row['S'], row['Strike'], row['TTM'], r, option),
+            [row for _, row in df.iterrows()]
+        ))
+    df = df.copy()
+    df['IV'] = ivs
+    return df.dropna(subset=['IV'])
+
+
 def plot_surface(df: pd.DataFrame, ax: Optional[plt.Axes] = None, label: str = 'Call') -> None:
     pivot = df.pivot_table(index='Strike', columns='TTM', values='IV', aggfunc='mean')
     X, Y = np.meshgrid(pivot.index.values, pivot.columns.values)
@@ -131,6 +143,9 @@ def main():
     logger.info("Reading input CSV %s", args.csv)
 
     df = pd.read_csv(args.csv)
+
+    # Use only a subset of the data for faster testing
+    df = df.head(100)
 
     if args.compare:
         logger.info("Preparing call and put data for comparison")
