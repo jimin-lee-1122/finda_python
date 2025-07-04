@@ -29,27 +29,45 @@ def prepare_data(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def compute_implied_volatility(df: pd.DataFrame, r: float = 0.05, q: float = 0.0) -> pd.DataFrame:
-    """Compute implied volatility using calcbsimpvol."""
-    params = {
-        "cp": df["cp"].to_numpy(),
-        "P": df["P"].to_numpy(),
-        "S": np.full(len(df), df["S"].iloc[0]),
-        "K": df["Strike"].to_numpy(),
-        "tau": np.full(len(df), df["tau"].iloc[0]),
-        "r": np.full(len(df), r),
-        "q": np.full(len(df), q),
-    }
-    # Debug: Print shape, dtype, and first 5 values
-    print("[DEBUG] params info:")
+    """Compute implied volatility using calcbsimpvol with meshgrid surface."""
+    # 1. unique strike, tau 추출
+    strikes = np.sort(df["Strike"].unique())
+    taus = np.sort(df["tau"].unique())
+    S = df["S"].iloc[0]
+    # 2. meshgrid 생성
+    K_grid, tau_grid = np.meshgrid(strikes, taus)
+    S_grid = np.full_like(K_grid, S, dtype=float)
+    r_grid = np.full_like(K_grid, r, dtype=float)
+    q_grid = np.full_like(K_grid, q, dtype=float)
+    # 3. cp, P 2D surface 생성 (mean aggregation)
+    cp_grid = np.full_like(K_grid, 1, dtype=int)  # 콜 옵션만 우선 예시
+    P_grid = np.full_like(K_grid, np.nan, dtype=float)
+    # 각 (tau, strike)에 해당하는 평균 P값 채우기
+    for i, tau_val in enumerate(taus):
+        for j, strike_val in enumerate(strikes):
+            mask = (df["tau"] == tau_val) & (df["Strike"] == strike_val) & (df["cp"] == 1)
+            if mask.any():
+                P_grid[i, j] = df.loc[mask, "P"].mean()
+    # 4. calcbsimpvol 호출
+    params = dict(cp=cp_grid, P=P_grid, S=S_grid, K=K_grid, tau=tau_grid, r=r_grid, q=q_grid)
+    print("[DEBUG] meshgrid shapes:")
     for k, v in params.items():
-        if isinstance(v, np.ndarray):
-            print(f"  {k}: shape={v.shape}, dtype={v.dtype}, first5={v[:5]}")
-        else:
-            print(f"  {k}: value={v}, type={type(v)}")
-    iv = calcbsimpvol(params)
-    df = df.copy()
-    df["implied_vol"] = iv
-    return df
+        print(f"  {k}: shape={v.shape}, dtype={v.dtype}, sample={v.flatten()[:5]}")
+    iv_grid = calcbsimpvol(params)
+    # 5. 결과를 DataFrame으로 변환
+    result = []
+    for i, tau_val in enumerate(taus):
+        for j, strike_val in enumerate(strikes):
+            if not np.isnan(P_grid[i, j]):
+                result.append({
+                    "Strike": strike_val,
+                    "tau": tau_val,
+                    "S": S,
+                    "P": P_grid[i, j],
+                    "cp": 1,
+                    "implied_vol": iv_grid[i, j],
+                })
+    return pd.DataFrame(result)
 
 
 def plot_iv_surface(df: pd.DataFrame) -> None:
