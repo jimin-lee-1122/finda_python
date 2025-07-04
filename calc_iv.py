@@ -29,47 +29,27 @@ def prepare_data(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def compute_implied_volatility(df: pd.DataFrame, r: float = 0.05, q: float = 0.0) -> pd.DataFrame:
-    """Compute implied volatility using calcbsimpvol, separately for call and put options."""
+    """Compute implied volatility using calcbsimpvol."""
+    params = {
+        "cp": df["cp"].to_numpy(),
+        "P": df["P"].to_numpy(),
+        "S": np.full(len(df), df["S"].iloc[0]),
+        "K": df["Strike"].to_numpy(),
+        "tau": np.full(len(df), df["tau"].iloc[0]),
+        "r": np.full(len(df), r),
+        "q": np.full(len(df), q),
+    }
+    # Debug: Print shape, dtype, and first 5 values
+    print("[DEBUG] params info:")
+    for k, v in params.items():
+        if isinstance(v, np.ndarray):
+            print(f"  {k}: shape={v.shape}, dtype={v.dtype}, first5={v[:5]}")
+        else:
+            print(f"  {k}: value={v}, type={type(v)}")
+    iv = calcbsimpvol(params)
     df = df.copy()
-    # Call options
-    call_df = df[df["cp"] == 1]
-    call_params = {
-        "cp": call_df["cp"].to_numpy(),
-        "P": call_df["P"].to_numpy(),
-        "S": call_df["S"].to_numpy(),
-        "K": call_df["Strike"].to_numpy(),
-        "tau": call_df["tau"].to_numpy(),
-        "r": np.full(len(call_df), r),
-        "q": np.full(len(call_df), q),
-    }
-    print("[DEBUG] Call option shapes:")
-    for k, v in call_params.items():
-        if isinstance(v, np.ndarray):
-            print(f"  {k}: {v.shape}")
-    call_iv = calcbsimpvol(call_params)
-    call_df["implied_vol"] = call_iv
-
-    # Put options
-    put_df = df[df["cp"] == -1]
-    put_params = {
-        "cp": put_df["cp"].to_numpy(),
-        "P": put_df["P"].to_numpy(),
-        "S": put_df["S"].to_numpy(),
-        "K": put_df["Strike"].to_numpy(),
-        "tau": put_df["tau"].to_numpy(),
-        "r": np.full(len(put_df), r),
-        "q": np.full(len(put_df), q),
-    }
-    print("[DEBUG] Put option shapes:")
-    for k, v in put_params.items():
-        if isinstance(v, np.ndarray):
-            print(f"  {k}: {v.shape}")
-    put_iv = calcbsimpvol(put_params)
-    put_df["implied_vol"] = put_iv
-
-    # 결과 합치기
-    result = pd.concat([call_df, put_df]).sort_index()
-    return result
+    df["implied_vol"] = iv
+    return df
 
 
 def plot_iv_surface(df: pd.DataFrame) -> None:
