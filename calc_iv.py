@@ -29,43 +29,23 @@ def prepare_data(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def compute_implied_volatility(df: pd.DataFrame, r: float = 0.05, q: float = 0.0) -> pd.DataFrame:
-    """Compute implied volatility using calcbsimpvol with meshgrid surface for both call and put."""
-    strikes = np.sort(df["Strike"].unique())
-    taus = np.sort(df["tau"].unique())
-    S = df["S"].iloc[0]
-    results = []
-    for cp_val in [1, -1]:
-        K_grid, tau_grid = np.meshgrid(strikes, taus)
-        S_grid = np.full_like(K_grid, S, dtype=float)
-        r_grid = np.full_like(K_grid, r, dtype=float)
-        q_grid = np.full_like(K_grid, q, dtype=float)
-        cp_grid = np.full_like(K_grid, cp_val, dtype=int)
-        P_grid = np.full_like(K_grid, np.nan, dtype=float)
-        for i, tau_val in enumerate(taus):
-            for j, strike_val in enumerate(strikes):
-                mask = (df["tau"] == tau_val) & (df["Strike"] == strike_val) & (df["cp"] == cp_val)
-                if mask.any():
-                    P_grid[i, j] = df.loc[mask, "P"].mean()
-        # 유효한 P만 계산
-        valid_mask = ~np.isnan(P_grid)
-        if np.any(valid_mask):
-            params = dict(cp=cp_grid, P=P_grid, S=S_grid, K=K_grid, tau=tau_grid, r=r_grid, q=q_grid)
-            print(f"[DEBUG] surface for cp={cp_val}")
-            for k, v in params.items():
-                print(f"  {k}: shape={v.shape}, dtype={v.dtype}, sample={v.flatten()[:5]}")
-            iv_grid = calcbsimpvol(params)
-            for i, tau_val in enumerate(taus):
-                for j, strike_val in enumerate(strikes):
-                    if not np.isnan(P_grid[i, j]):
-                        results.append({
-                            "Strike": strike_val,
-                            "tau": tau_val,
-                            "S": S,
-                            "P": P_grid[i, j],
-                            "cp": cp_val,
-                            "implied_vol": iv_grid[i, j],
-                        })
-    return pd.DataFrame(results)
+    """Compute implied volatility using calcbsimpvol (1D vector per option)."""
+    params = {
+        "cp": df["cp"].to_numpy(),
+        "P": df["P"].to_numpy(),
+        "S": df["S"].to_numpy(),
+        "K": df["Strike"].to_numpy(),
+        "tau": df["tau"].to_numpy(),
+        "r": np.full(len(df), r),
+        "q": np.full(len(df), q),
+    }
+    print("[DEBUG] params info:")
+    for k, v in params.items():
+        print(f"  {k}: shape={v.shape}, dtype={v.dtype}, first5={v[:5]}")
+    iv = calcbsimpvol(params)
+    df = df.copy()
+    df["implied_vol"] = iv
+    return df
 
 
 def plot_iv_surface(df: pd.DataFrame) -> None:
