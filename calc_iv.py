@@ -29,26 +29,30 @@ def prepare_data(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def compute_implied_volatility(df: pd.DataFrame, r: float = 0.05, q: float = 0.0) -> pd.DataFrame:
-    """Compute implied volatility using calcbsimpvol (S, tau, r, q as scalars)."""
-    params = {
-        "cp": df["cp"].to_numpy(),
-        "P": df["P"].to_numpy(),
-        "S": np.full(len(df), df["S"].iloc[0]),
-        "K": df["Strike"].to_numpy(),
-        "tau": np.full(len(df), df["tau"].iloc[0]),
-        "r": np.full(len(df), r),
-        "q": np.full(len(df), q),
-    }
-    print("[DEBUG] params info:")
-    for k, v in params.items():
-        if isinstance(v, np.ndarray):
-            print(f"  {k}: shape={v.shape}, dtype={v.dtype}, first5={v[:5]}")
-        else:
-            print(f"  {k}: value={v}, type={type(v)}")
-    iv = calcbsimpvol(params)
-    df = df.copy()
-    df["implied_vol"] = iv
-    return df
+    """S, tau가 같은 옵션끼리 그룹화하여 각각 calcbsimpvol을 호출하고 결과를 합칩니다."""
+    results = []
+    for (S, tau), group in df.groupby(['S', 'tau']):
+        params = {
+            "cp": group["cp"].to_numpy(),
+            "P": group["P"].to_numpy(),
+            "S": S,
+            "K": group["Strike"].to_numpy(),
+            "tau": tau,
+            "r": r,
+            "q": q,
+        }
+        print(f"[DEBUG] group S={S}, tau={tau}, size={len(group)}")
+        for k, v in params.items():
+            if isinstance(v, np.ndarray):
+                print(f"  {k}: shape={v.shape}, dtype={v.dtype}, first5={v[:5]}")
+            else:
+                print(f"  {k}: value={v}, type={type(v)}")
+        iv = calcbsimpvol(params)
+        group = group.copy()
+        group["implied_vol"] = iv
+        results.append(group)
+    result_df = pd.concat(results, ignore_index=True)
+    return result_df
 
 
 def plot_iv_surface(df: pd.DataFrame) -> None:
