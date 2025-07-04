@@ -29,30 +29,34 @@ def prepare_data(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def compute_implied_volatility(df: pd.DataFrame, r: float = 0.05, q: float = 0.0) -> pd.DataFrame:
-    """S, tau가 같은 옵션끼리 그룹화하여 각각 calcbsimpvol을 호출하고 결과를 합칩니다."""
-    results = []
-    for (S, tau), group in df.groupby(['S', 'tau']):
+    """Compute implied volatility for each option individually.
+
+    ``calcbsimpvol`` expects scalar values for ``S``, ``tau``, ``r`` and ``q``.
+    When these are shared across options, broadcasting can lead to errors.
+    This function iterates over each option and calls ``calcbsimpvol`` one by one
+    to avoid such issues.
+    """
+
+    ivs = []
+    for idx, row in df.iterrows():
         params = {
-            "cp": group["cp"].to_numpy(),
-            "P": group["P"].to_numpy(),
-            "S": S,
-            "K": group["Strike"].to_numpy(),
-            "tau": tau,
+            "cp": np.array([row["cp"]]),
+            "P": np.array([row["P"]]),
+            "S": row["S"],
+            "K": np.array([row["Strike"]]),
+            "tau": row["tau"],
             "r": r,
             "q": q,
         }
-        print(f"[DEBUG] group S={S}, tau={tau}, size={len(group)}")
-        for k, v in params.items():
-            if isinstance(v, np.ndarray):
-                print(f"  {k}: shape={v.shape}, dtype={v.dtype}, first5={v[:5]}")
-            else:
-                print(f"  {k}: value={v}, type={type(v)}")
-        iv = calcbsimpvol(params)
-        group = group.copy()
-        group["implied_vol"] = iv
-        results.append(group)
-    result_df = pd.concat(results, ignore_index=True)
-    return result_df
+        try:
+            iv = calcbsimpvol(params)[0]
+        except Exception:
+            iv = np.nan
+        ivs.append(iv)
+
+    df = df.copy()
+    df["implied_vol"] = ivs
+    return df
 
 
 def plot_iv_surface(df: pd.DataFrame) -> None:
