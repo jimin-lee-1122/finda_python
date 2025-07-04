@@ -97,11 +97,20 @@ def plot_surface(df: pd.DataFrame, ax: Optional[plt.Axes] = None, label: str = '
     ax.set_title(f'IV Surface ({label})')
 
 
+def save_output(df: pd.DataFrame, path: str) -> None:
+    """Save IV data to CSV or Excel depending on the file extension."""
+    if path.lower().endswith(".xlsx"):
+        df.to_excel(path, index=False)
+    else:
+        df.to_csv(path, index=False)
+
+
 def main():
-    parser = argparse.ArgumentParser(description='Compute IV surface from option data')
-    parser.add_argument('csv', help='CSV file with option data')
-    parser.add_argument('--put', action='store_true', help='use put options instead of call')
-    parser.add_argument('--compare', action='store_true', help='compare call and put surfaces')
+    parser = argparse.ArgumentParser(description="Compute IV surface from option data")
+    parser.add_argument("csv", help="CSV file with option data")
+    parser.add_argument("--output", "-o", default="iv_surface.csv", help="path to save calculated IV data (CSV)")
+    parser.add_argument("--put", action="store_true", help="use put options instead of call")
+    parser.add_argument("--compare", action="store_true", help="compare call and put surfaces")
     args = parser.parse_args()
 
     df = pd.read_csv(args.csv)
@@ -110,18 +119,23 @@ def main():
         call_df = prepare(df[df['STK_TP_CD'].str.upper() == 'C'])
         put_df = prepare(df[df['STK_TP_CD'].str.upper() == 'P'])
         call_iv = compute_iv(call_df, 'c')
+        call_iv['Option'] = 'Call'
         put_iv = compute_iv(put_df, 'p')
+        put_iv['Option'] = 'Put'
         fig = plt.figure(figsize=(10, 6))
         ax = fig.add_subplot(111, projection='3d')
         plot_surface(call_iv, ax=ax, label='Call')
         plot_surface(put_iv, ax=ax, label='Put')
         plt.legend()
+        save_output(pd.concat([call_iv, put_iv]), args.output)
     else:
         opt_type = 'p' if args.put else 'c'
         df_opt = df[df['STK_TP_CD'].str.upper() == ('P' if args.put else 'C')]
         df_opt = prepare(df_opt)
         iv_df = compute_iv(df_opt, opt_type)
+        iv_df['Option'] = 'Put' if args.put else 'Call'
         plot_surface(iv_df, label='Put' if args.put else 'Call')
+        save_output(iv_df, args.output)
 
     plt.tight_layout()
     plt.show()
