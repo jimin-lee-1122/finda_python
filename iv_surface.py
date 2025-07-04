@@ -12,8 +12,9 @@ from tqdm import tqdm
 from concurrent.futures import ThreadPoolExecutor
 import time
 import seaborn as sns
+from scipy.optimize import curve_fit
 
-logging.basicConfig(format="%(asctime)s [%(levelname)s] %(message)s")
+logging.basicConfig(format="%(asctime)s [%(levelname)s] %(message)s", filename='iv_debug.log', filemode='w')
 logger = logging.getLogger(__name__)
 
 
@@ -22,9 +23,9 @@ def parse_strike(row: pd.Series) -> float:
         return float(row['STRIKE'])
     if 'STK_CD' in row and isinstance(row['STK_CD'], str):
         import re
-        m = re.search(r"(\d+)$", row['STK_CD'])
+        m = re.search(r"[CP](\d+)", row['STK_CD'])
         if m:
-            return float(m.group(1)) / 1000.0  # assume last digits represent strike
+            return float(m.group(1))
     return np.nan
 
 
@@ -53,32 +54,57 @@ def bs_vega(S: float, K: float, T: float, r: float, sigma: float) -> float:
 
 
 def implied_vol_optimized(price, S, K, T, r, option):
-    if price <= 0.01 or S <= 0 or K <= 0 or T <= 0:
+    if price <= 0.001 or S <= 0 or K <= 0 or T <= 0:
         return np.nan
 
+    # 시간가치가 너무 작으면 NaN 처리 (조건 완화)
     intrinsic = max(S - K, 0) if option.lower() == 'c' else max(K - S, 0)
-    if price <= intrinsic:
+    if price <= intrinsic + 1e-3:
         return np.nan
 
-    sigma = 0.3
-    for i in range(50):
+    sigma = 0.3  # 초기 추정값
+    for _ in range(50):
         vega = bs_vega(S, K, T, r, sigma)
-        if vega < 1e-6:
-            print(f"[DEBUG] Vega too small at iter {i}, sigma={sigma:.4f}")
+        if vega < 1e-8:  # Vega가 너무 작으면 빠르게 종료 (더 낮게 허용)
             return np.nan
         price_est = bs_price(S, K, T, r, sigma, option)
         diff = price_est - price
-        if np.isnan(price_est) or abs(diff) > 10:
-            print(f"[DEBUG] price_est abnormal at iter {i}, sigma={sigma:.4f}, diff={diff:.4f}")
-            return np.nan
         if abs(diff) < 1e-4:
             return sigma
-        if i % 10 == 0:
-            print(f"[DEBUG] Iter {i} | sigma: {sigma:.4f} | diff: {diff:.4f} | vega: {vega:.4f}")
         sigma -= diff / vega
         sigma = np.clip(sigma, 0.001, 5.0)
-    print(f"[DEBUG] Max iter reached, returning NaN")
     return np.nan
+
+
+def svi_raw(k, a, b, rho, m, sigma):
+    return a + b * (rho * (k - m) + np.sqrt((k - m)**2 + sigma**2))
+
+def fit_svi_for_ttm(df_ttm):
+    F = df_ttm['S'].iloc[0] * np.exp(0.03 * df_ttm['TTM'].iloc[0])
+    k = np.log(df_ttm['Strike'] / F)
+    w = (df_ttm['IV'] ** 2) * df_ttm['TTM']
+    p0 = [0.01, 0.1, 0.0, 0.0, 0.1]
+    try:
+        popt, _ = curve_fit(svi_raw, k, w, p0=p0, maxfev=10000)
+        return popt
+    except Exception:
+        return None
+
+def svi_surface(df):
+    svi_iv = []
+    for ttm, group in df.groupby('TTM'):
+        popt = fit_svi_for_ttm(group)
+        if popt is None:
+            svi_iv.extend([np.nan]*len(group))
+            continue
+        F = group['S'].iloc[0] * np.exp(0.03 * ttm)
+        k = np.log(group['Strike'] / F)
+        w_svi = svi_raw(k, *popt)
+        iv_svi = np.sqrt(np.maximum(w_svi / ttm, 0))
+        svi_iv.extend(iv_svi)
+    df = df.copy()
+    df['IV_SVI'] = svi_iv
+    return df
 
 
 def prepare(df: pd.DataFrame) -> pd.DataFrame:
@@ -88,22 +114,27 @@ def prepare(df: pd.DataFrame) -> pd.DataFrame:
     # 벡터화된 연산 사용
     df['Strike'] = df.apply(parse_strike, axis=1)
     df['TTM'] = df.apply(lambda row: compute_ttm(row['STD_DT'], row['EXR_DT']), axis=1)
-    print("[DEBUG] Strike, TTM 생성 후 샘플:")
-    print(df[['STK_CD', 'Strike', 'STD_DT', 'EXR_DT', 'TTM', 'SETL_PRC', 'BASE_CLPRC']].head(10))
+    logger.debug("[DEBUG] Strike, TTM 생성 후 샘플:")
+    logger.debug(df[['STK_CD', 'Strike', 'STD_DT', 'EXR_DT', 'TTM', 'SETL_PRC', 'BASE_CLPRC', 'STK_TP_CD']].head(10).to_string())
     price_col = 'SETL_PRC'
     if price_col not in df.columns:
         if 'MID_PRC' in df.columns:
             price_col = 'MID_PRC'
         else:
             raise KeyError('SETL_PRC or MID_PRC column required')
-    print(f"[DEBUG] dropna 전: {len(df)}")
+    logger.debug(f"[DEBUG] dropna 전: {len(df)}")
     df = df.dropna(subset=['Strike', 'TTM', price_col, 'BASE_CLPRC'])
-    print(f"[DEBUG] dropna 후: {len(df)}")
+    logger.debug(f"[DEBUG] dropna 후: {len(df)}")
+    logger.debug("[DEBUG] dropna 후 샘플:")
+    logger.debug(df[['STK_CD', 'Strike', 'TTM', price_col, 'BASE_CLPRC', 'STK_TP_CD']].head(10).to_string())
     df['Price'] = df[price_col].astype(float)
     df['S'] = df['BASE_CLPRC'].astype(float)
     
     # 비현실적인 값들 필터링
     df = df[(df['Price'] > 0) & (df['S'] > 0) & (df['Strike'] > 0) & (df['TTM'] > 0)]
+    logger.debug(f"[DEBUG] 최종 필터 후: {len(df)}")
+    logger.debug("[DEBUG] 최종 필터 후 샘플:")
+    logger.debug(df[['STK_CD', 'Strike', 'TTM', 'Price', 'S', 'STK_TP_CD']].head(10).to_string())
     
     return df
 
@@ -142,26 +173,25 @@ def compute_iv(
     return df.dropna(subset=['IV'])
 
 
-def plot_surface(df: pd.DataFrame, ax: Optional[plt.Axes] = None, label: str = 'Call') -> None:
-    print(f"[INFO] 유효한 IV 데이터 수: {df['IV'].notna().sum()}")
-    sns.histplot(df['IV'].dropna(), bins=40, kde=True)
-    plt.title(f"Implied Volatility Distribution ({label})")
-    plt.show()
-
-    pivot = df.pivot_table(index='Strike', columns='TTM', values='IV', aggfunc='mean')
+def plot_surface(df: pd.DataFrame, ax: Optional[plt.Axes] = None, label: str = 'Call', iv_col: str = 'IV') -> None:
+    pivot = df.pivot_table(index='Strike', columns='TTM', values=iv_col, aggfunc='mean')
     if pivot.empty:
-        print("[WARN] IV pivot 테이블이 비어 있습니다. 시각화 생략.")
+        print(f"[WARN] {iv_col} 피벗 결과가 비어 있습니다. 스킕합니다.")
         return
+
     X, Y = np.meshgrid(pivot.index.values, pivot.columns.values)
     Z = pivot.values.T
+
     if ax is None:
         fig = plt.figure(figsize=(10, 7))
         ax = fig.add_subplot(111, projection='3d')
-    ax.plot_surface(X, Y, Z, alpha=0.7)
+
+    surf = ax.plot_surface(X, Y, Z, cmap='viridis', edgecolor='none', alpha=0.8)
     ax.set_xlabel('Strike')
     ax.set_ylabel('TTM')
-    ax.set_zlabel('IV')
-    ax.set_title(f'IV Surface ({label})')
+    ax.set_zlabel(iv_col)
+    ax.set_title(f'{iv_col} Surface - {label}')
+    plt.show()
 
 
 def save_output(df: pd.DataFrame, path: str) -> None:
@@ -227,11 +257,19 @@ def main():
         
         fig = plt.figure(figsize=(10, 6))
         ax = fig.add_subplot(111, projection='3d')
-        plot_surface(call_iv, ax=ax, label='Call')
-        plot_surface(put_iv, ax=ax, label='Put')
+        plot_surface(call_iv, ax=ax, label='Call', iv_col='IV')
+        plot_surface(put_iv, ax=ax, label='Put', iv_col='IV')
         plt.legend()
         out_df = pd.concat([call_iv, put_iv])
         save_output(out_df, args.output)
+        # SVI 보정 surface (콜/풋 각각)
+        call_iv_svi = svi_surface(call_iv)
+        put_iv_svi = svi_surface(put_iv)
+        fig2 = plt.figure(figsize=(10, 6))
+        ax2 = fig2.add_subplot(111, projection='3d')
+        plot_surface(call_iv_svi, ax=ax2, label='Call SVI', iv_col='IV_SVI')
+        plot_surface(put_iv_svi, ax=ax2, label='Put SVI', iv_col='IV_SVI')
+        plt.legend()
     else:
         opt_type = 'p' if args.put else 'c'
         logger.info("Preparing %s option data", "put" if args.put else "call")
@@ -252,8 +290,11 @@ def main():
         else:
             iv_df = compute_func(df_opt, opt_type, show_progress=args.verbose)
         iv_df['Option'] = 'Put' if args.put else 'Call'
-        plot_surface(iv_df, label='Put' if args.put else 'Call')
+        plot_surface(iv_df, label='Put' if args.put else 'Call', iv_col='IV')
         save_output(iv_df, args.output)
+        # SVI 보정 surface
+        iv_df_svi = svi_surface(iv_df)
+        plot_surface(iv_df_svi, label='SVI Fitted', iv_col='IV_SVI')
 
     end_time = time.time()
     logger.info("Computation completed in %.2f seconds", end_time - start_time)
